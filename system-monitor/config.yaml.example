@@ -1,0 +1,97 @@
+# ================================================
+# System Monitor - Configuration File
+# ================================================
+# Copia questo file come config.yaml e modifica i valori
+# 
+# Le variabili d'ambiente hanno priorità su questo file.
+# Prefisso: SYSMON_*
+
+# ------------------------------------------------
+# Modalità di esecuzione: "server" o "client"
+# ------------------------------------------------
+mode: client
+
+# ------------------------------------------------
+# Configurazione Server (solo se mode=server)
+# ------------------------------------------------
+server:
+  # Indirizzo di bind
+  host: "0.0.0.0"
+  # Porta di ascolto
+  port: 8080
+
+# ------------------------------------------------
+# Configurazione Client (solo se mode=client)
+# ------------------------------------------------
+client:
+  # URL del server (incluso http/https e porta)
+  server_url: "http://192.168.1.100:8080"
+  
+  # ID univoco del client (opzionale, default=hostname)
+  # Utile per identificare il server in modo più descrittivo
+  client_id: null  # es: "webserver-prod", "db-server-01"
+  
+  # Intervallo di raccolta metriche in minuti
+  collect_interval_minutes: 15
+
+# ------------------------------------------------
+# Configurazione Notifiche ntfy.sh
+# ------------------------------------------------
+ntfy:
+  # Abilita/disabilita le notifiche
+  enabled: true
+  
+  # Server ntfy (default: pubblico)
+  # Puoi usare il tuo server self-hosted
+  server_url: "https://ntfy.sh"
+  
+  # Topic per le notifiche
+  # IMPORTANTE: usa un topic unico e difficile da indovinare!
+  topic: "my-system-monitor-abc123"
+  
+  # Priorità default: min, low, default, high, max
+  priority: "default"
+
+# ------------------------------------------------
+# Soglie per gli Alert
+# ------------------------------------------------
+alerts:
+  # Percentuale CPU oltre la quale generare alert
+  cpu_percent: 90.0
+  
+  # Percentuale RAM oltre la quale generare alert
+  ram_percent: 90.0
+  
+  # Percentuale disco oltre la quale generare alert
+  disk_percent: 85.0
+  
+  # Temperatura CPU in °C oltre la quale generare alert
+  temperature_celsius: 80.0
+  
+  # Moltiplicatore load average (soglia = cpu_count * multiplier)
+  # Es: con 4 CPU e multiplier 2.0, soglia = 8.0
+  load_avg_multiplier: 2.0
+
+# ------------------------------------------------
+# Configurazione Notifiche Schedulate
+# ------------------------------------------------
+notifications:
+  # Ora UTC per il report giornaliero (0-23)
+  daily_report_hour_utc: 7
+  
+  # Minuto per il report giornaliero (0-59)
+  daily_report_minute_utc: 0
+  
+  # Invia alert immediati quando si supera una soglia
+  send_immediate_alerts: true
+
+# ------------------------------------------------
+# Configurazione Database
+# ------------------------------------------------
+database:
+  # Path del database SQLite
+  path: "/data/system_monitor.db"
+  
+  # Giorni di retention dei dati
+  retention_days: 30
+

@@ -1,0 +1,81 @@
+# Docker Compose per System Monitor
+# 
+# Uso:
+#   Server: docker compose --profile server up -d
+#   Client: docker compose --profile client up -d
+#
+# Oppure direttamente:
+#   docker compose up -d system-monitor-server
+#   docker compose up -d system-monitor-client
+
+services:
+  # ============================================
+  # SERVER - Da eseguire su un solo host
+  # ============================================
+  system-monitor-server:
+    build: .
+    container_name: system-monitor-server
+    profiles:
+      - server
+    restart: unless-stopped
+    
+    environment:
+      - SYSMON_MODE=server
+      - SYSMON_CONFIG_PATH=/config/config.yaml
+    
+    volumes:
+      # Configurazione (crea config.yaml dalla copia di config.yaml.example)
+      - ./config.yaml:/config/config.yaml:ro
+      # Database persistente
+      - system-monitor-data:/data
+      # Per leggere temperatura CPU (opzionale)
+      - /sys:/host/sys:ro
+    
+    ports:
+      - "8080:8080"
+    
+    # Accesso alle metriche di sistema dell'host
+    pid: host
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================
+  # CLIENT - Da eseguire su ogni host da monitorare
+  # ============================================
+  system-monitor-client:
+    build: .
+    container_name: system-monitor-client
+    profiles:
+      - client
+    restart: unless-stopped
+    
+    environment:
+      - SYSMON_MODE=client
+      - SYSMON_CONFIG_PATH=/config/config.yaml
+      # Oppure configura direttamente via env:
+      # - SYSMON_SERVER_URL=http://192.168.1.100:8080
+      # - SYSMON_CLIENT_ID=my-server-name
+      # - SYSMON_COLLECT_INTERVAL=15
+    
+    volumes:
+      # Configurazione
+      - ./config.yaml:/config/config.yaml:ro
+      # Per leggere temperatura CPU (opzionale)
+      - /sys:/host/sys:ro
+    
+    # IMPORTANTE: accesso alle metriche di sistema dell'host
+    pid: host
+    
+    # Network mode host per leggere correttamente le metriche di rete
+    # Decommentare se si preferisce usare la rete dell'host
+    # network_mode: host
+
+volumes:
+  system-monitor-data:
+    name: system-monitor-data
+
