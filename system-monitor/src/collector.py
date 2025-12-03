@@ -1,6 +1,9 @@
 """System metrics collector using psutil."""
 import os
+import re
+import shutil
 import socket
+import subprocess
 import time
 from datetime import datetime
 from typing import Optional
@@ -13,6 +16,8 @@ from .models import (
     DiskPartition,
     NetworkIO,
     SystemMetrics,
+    PackageUpdates,
+    UpdatablePackage,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,9 +201,254 @@ def collect_metrics(client_id: Optional[str] = None) -> SystemMetrics:
     )
 
 
+def _detect_package_manager() -> Optional[str]:
+    """Detect the system's package manager."""
+    managers = [
+        ("apt", "/usr/bin/apt"),
+        ("dnf", "/usr/bin/dnf"),
+        ("yum", "/usr/bin/yum"),
+        ("pacman", "/usr/bin/pacman"),
+        ("zypper", "/usr/bin/zypper"),
+    ]
+    
+    for name, path in managers:
+        if shutil.which(name) or os.path.exists(path):
+            return name
+    
+    return None
+
+
+def _parse_apt_updates(output: str) -> tuple[list[UpdatablePackage], int]:
+    """Parse apt list --upgradable output."""
+    packages = []
+    security_count = 0
+    
+    for line in output.strip().split("\n"):
+        if not line or line.startswith("Listing") or line.startswith("WARNING"):
+            continue
+        
+        # Format: package/repo version arch [upgradable from: old_version]
+        # Example: curl/jammy-updates 7.81.0-1ubuntu1.15 amd64 [upgradable from: 7.81.0-1ubuntu1.14]
+        match = re.match(r"^([^/]+)/(\S+)\s+(\S+)\s+\S+\s+\[upgradable from:\s+([^\]]+)\]", line)
+        if match:
+            name, repo, new_ver, old_ver = match.groups()
+            packages.append(UpdatablePackage(
+                name=name,
+                current_version=old_ver,
+                new_version=new_ver,
+                repository=repo
+            ))
+            if "security" in repo.lower():
+                security_count += 1
+    
+    return packages, security_count
+
+
+def _parse_dnf_updates(output: str) -> tuple[list[UpdatablePackage], int]:
+    """Parse dnf check-update output."""
+    packages = []
+    security_count = 0
+    
+    for line in output.strip().split("\n"):
+        if not line or line.startswith("Last metadata"):
+            continue
+        
+        # Format: package.arch    version    repository
+        parts = line.split()
+        if len(parts) >= 3:
+            name_arch = parts[0]
+            new_ver = parts[1]
+            repo = parts[2] if len(parts) > 2 else "unknown"
+            
+            # Remove architecture from name
+            name = name_arch.rsplit(".", 1)[0] if "." in name_arch else name_arch
+            
+            packages.append(UpdatablePackage(
+                name=name,
+                current_version="installed",
+                new_version=new_ver,
+                repository=repo
+            ))
+    
+    return packages, security_count
+
+
+def _parse_pacman_updates(output: str) -> tuple[list[UpdatablePackage], int]:
+    """Parse pacman -Qu output."""
+    packages = []
+    
+    for line in output.strip().split("\n"):
+        if not line:
+            continue
+        
+        # Format: package old_version -> new_version
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "->":
+            packages.append(UpdatablePackage(
+                name=parts[0],
+                current_version=parts[1],
+                new_version=parts[3],
+                repository="pacman"
+            ))
+    
+    return packages, 0
+
+
+def _parse_zypper_updates(output: str) -> tuple[list[UpdatablePackage], int]:
+    """Parse zypper list-updates output."""
+    packages = []
+    security_count = 0
+    
+    for line in output.strip().split("\n"):
+        if not line or line.startswith("Loading") or line.startswith("Reading") or "|" not in line:
+            continue
+        
+        # Skip header
+        if "Name" in line and "Version" in line:
+            continue
+        
+        # Format: S | Repository | Name | Current Version | Available Version | Arch
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 5:
+            status = parts[0]
+            repo = parts[1]
+            name = parts[2]
+            current = parts[3]
+            available = parts[4]
+            
+            packages.append(UpdatablePackage(
+                name=name,
+                current_version=current,
+                new_version=available,
+                repository=repo
+            ))
+            
+            if status.lower() == "s":  # Security update
+                security_count += 1
+    
+    return packages, security_count
+
+
+def collect_package_updates(client_id: Optional[str] = None) -> Optional[PackageUpdates]:
+    """
+    Collect information about upgradable packages.
+    
+    Args:
+        client_id: Custom client identifier. If None, hostname is used.
+    
+    Returns:
+        PackageUpdates object or None if package manager not found.
+    """
+    hostname = get_hostname()
+    if client_id is None:
+        client_id = hostname
+    
+    pkg_manager = _detect_package_manager()
+    if not pkg_manager:
+        logger.warning("No supported package manager found")
+        return None
+    
+    packages: list[UpdatablePackage] = []
+    security_count = 0
+    
+    try:
+        if pkg_manager == "apt":
+            # Update package list first (non-blocking, just check cache)
+            subprocess.run(
+                ["apt", "update"],
+                capture_output=True,
+                timeout=300,
+                check=False
+            )
+            result = subprocess.run(
+                ["apt", "list", "--upgradable"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False
+            )
+            if result.returncode == 0:
+                packages, security_count = _parse_apt_updates(result.stdout)
+        
+        elif pkg_manager == "dnf":
+            result = subprocess.run(
+                ["dnf", "check-update", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False
+            )
+            # dnf check-update returns 100 if updates available, 0 if none
+            if result.returncode in (0, 100):
+                packages, security_count = _parse_dnf_updates(result.stdout)
+        
+        elif pkg_manager == "yum":
+            result = subprocess.run(
+                ["yum", "check-update", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False
+            )
+            if result.returncode in (0, 100):
+                packages, security_count = _parse_dnf_updates(result.stdout)  # Same format
+        
+        elif pkg_manager == "pacman":
+            # Sync database first
+            subprocess.run(
+                ["pacman", "-Sy"],
+                capture_output=True,
+                timeout=120,
+                check=False
+            )
+            result = subprocess.run(
+                ["pacman", "-Qu"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False
+            )
+            if result.returncode == 0:
+                packages, security_count = _parse_pacman_updates(result.stdout)
+        
+        elif pkg_manager == "zypper":
+            result = subprocess.run(
+                ["zypper", "--non-interactive", "list-updates"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False
+            )
+            if result.returncode == 0:
+                packages, security_count = _parse_zypper_updates(result.stdout)
+        
+        logger.info(f"Found {len(packages)} upgradable packages ({security_count} security)")
+        
+        return PackageUpdates(
+            client_id=client_id,
+            hostname=hostname,
+            collected_at=datetime.utcnow(),
+            package_manager=pkg_manager,
+            packages=packages,
+            security_updates=security_count,
+        )
+        
+    except subprocess.TimeoutExpired:
+        logger.error(f"Timeout checking for package updates with {pkg_manager}")
+        return None
+    except Exception as e:
+        logger.exception(f"Error collecting package updates: {e}")
+        return None
+
+
 if __name__ == "__main__":
     # Test collection
     import json
     metrics = collect_metrics()
     print(json.dumps(metrics.model_dump(), indent=2, default=str))
+    
+    print("\n--- Package Updates ---")
+    updates = collect_package_updates()
+    if updates:
+        print(json.dumps(updates.model_dump(), indent=2, default=str))
 

@@ -148,3 +148,32 @@ class ClientInfo(BaseModel):
     last_seen: datetime
     metrics_count: int
 
+
+class UpdatablePackage(BaseModel):
+    """A package that can be updated."""
+    name: str
+    current_version: str
+    new_version: str
+    repository: Optional[str] = None
+
+
+class PackageUpdates(BaseModel):
+    """Package updates info from a client."""
+    client_id: str
+    hostname: str
+    collected_at: datetime = Field(default_factory=datetime.utcnow)
+    package_manager: str  # apt, dnf, yum, pacman, zypper
+    packages: list[UpdatablePackage]
+    security_updates: int = 0  # Count of security-related updates
+    
+    @property
+    def total_count(self) -> int:
+        return len(self.packages)
+
+
+class PackageUpdatesReport(BaseModel):
+    """Response from server after receiving package updates."""
+    status: str
+    message: str
+    received_at: datetime
+

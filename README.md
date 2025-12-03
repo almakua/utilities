@@ -24,6 +24,7 @@ Sistema di monitoraggio distribuito per server Linux. Raccoglie metriche di sist
 - **Notifiche Push**: Via ntfy.sh (self-hosted o pubblico)
 - **Alert in tempo reale**: Notifica immediata al superamento delle soglie
 - **Report giornaliero**: Riepilogo completo alle 07:00 UTC
+- **Report settimanale pacchetti**: Lista pacchetti da aggiornare su tutti i sistemi
 
 ## 📊 Metriche Raccolte
 
@@ -36,6 +37,7 @@ Sistema di monitoraggio distribuito per server Linux. Raccoglie metriche di sist
 | 🌐 **Network** | I/O bytes e pacchetti | Inviati e ricevuti |
 | ⚡ **Load Average** | 1, 5, 15 minuti | Con soglia dinamica basata su CPU count |
 | 📊 **Sistema** | Uptime, processi | Secondi di uptime, numero processi attivi |
+| 📦 **Pacchetti** | Aggiornamenti disponibili | Supporta apt, dnf, yum, pacman, zypper |
 
 ## 🏗️ Architettura
 
@@ -62,8 +64,9 @@ Sistema di monitoraggio distribuito per server Linux. Raccoglie metriche di sist
 │  │    FastAPI      │  │    Database     │  │   APScheduler       │ │
 │  │                 │  │                 │  │                     │ │
 │  │  POST /metrics  │  │  - metrics      │  │  - Daily report     │ │
-│  │  GET /clients   │  │  - alerts       │  │    (07:00 UTC)      │ │
-│  │  GET /alerts    │  │  - clients      │  │  - Data cleanup     │ │
+│  │  POST /packages │  │  - alerts       │  │    (07:00 UTC)      │ │
+│  │  GET /clients   │  │  - clients      │  │  - Weekly packages  │ │
+│  │  GET /alerts    │  │  - packages     │  │  - Data cleanup     │ │
 │  └────────┬────────┘  └─────────────────┘  └──────────┬──────────┘ │
 │           │                                           │             │
 │           │         Alert immediati                   │             │
@@ -129,11 +132,14 @@ alerts:
   disk_percent: 85.0
   temperature_celsius: 80.0
 
-# Report giornaliero
+# Report giornaliero e settimanale
 notifications:
   daily_report_hour_utc: 7
   daily_report_minute_utc: 0
   send_immediate_alerts: true
+  weekly_packages_enabled: true
+  weekly_packages_day: "monday"
+  weekly_packages_hour_utc: 8
 
 # Database
 database:
@@ -255,6 +261,11 @@ notifications:
   daily_report_hour_utc: 7
   daily_report_minute_utc: 0
   send_immediate_alerts: true
+  # Weekly package updates report
+  weekly_packages_enabled: true
+  weekly_packages_day: "monday"     # Giorno della settimana
+  weekly_packages_hour_utc: 8
+  weekly_packages_minute_utc: 0
 
 # ------------------------------------------------
 # Database
@@ -290,7 +301,10 @@ Le variabili d'ambiente hanno **priorità** sul file di configurazione. Prefisso
 | `SYSMON_ALERT_DISK` | Soglia Disco % | `85` |
 | `SYSMON_ALERT_TEMP` | Soglia Temp °C | `80` |
 | **Schedule** |
-| `SYSMON_DAILY_HOUR` | Ora report UTC | `7` |
+| `SYSMON_DAILY_HOUR` | Ora report giornaliero UTC | `7` |
+| `SYSMON_WEEKLY_PKG_ENABLED` | Abilita report settimanale | `true` |
+| `SYSMON_WEEKLY_PKG_DAY` | Giorno report (monday, etc.) | `monday` |
+| `SYSMON_WEEKLY_PKG_HOUR` | Ora report settimanale UTC | `8` |
 | **Database** |
 | `SYSMON_DB_PATH` | Path database | `/data/system_monitor.db` |
 | `SYSMON_DB_RETENTION` | Retention giorni | `30` |
@@ -317,11 +331,16 @@ Il server espone una REST API completa:
 |--------|----------|-------------|
 | `GET` | `/health` | Health check |
 | `POST` | `/metrics` | Riceve metriche dai client |
+| `POST` | `/packages` | Riceve lista pacchetti aggiornabili |
 | `GET` | `/clients` | Lista tutti i client registrati |
 | `GET` | `/clients/{id}/summary` | Summary giornaliero per client |
+| `GET` | `/packages` | Lista pacchetti aggiornabili (tutti i client) |
+| `GET` | `/packages/{id}` | Pacchetti aggiornabili per client |
 | `GET` | `/alerts` | Lista alert recenti |
-| `POST` | `/test/daily-report` | Trigger manuale del report |
+| `POST` | `/test/daily-report` | Trigger manuale report giornaliero |
+| `POST` | `/test/weekly-report` | Trigger manuale report settimanale |
 | `POST` | `/test/collect` | Raccoglie metriche locali (test) |
+| `POST` | `/test/collect-packages` | Raccoglie pacchetti locali (test) |
 
 ### Esempi di Utilizzo
 
@@ -404,6 +423,64 @@ Inviato ogni giorno all'ora configurata (default 07:00 UTC):
 │ Load max: 1.23 | Uptime: 2160.0h
 └─────────────────────────
 ```
+
+#### 3. Report Settimanale Pacchetti (Priorità Variabile)
+
+Inviato ogni settimana (default: Lunedì 08:00 UTC) con la lista dei pacchetti da aggiornare:
+
+```
+📦 Report Settimanale Pacchetti
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 Settimana: 2024-03
+🖥️ Sistemi: 3
+📊 Totale aggiornamenti: 47
+🔒 Aggiornamenti sicurezza: 5
+
+┌─ 🔴 database-server (db-01)
+│ Pacchetti: 28 (apt)
+│ 🔒 Sicurezza: 3
+│ Top pacchetti:
+│   • linux-image: 5.15.0-91 → 5.15.0-94
+│   • openssl: 3.0.2-0ubuntu1.12 → 3.0.2-0ubuntu1.14
+│   • curl: 7.81.0-1ubuntu1.14 → 7.81.0-1ubuntu1.15
+│   • nginx: 1.18.0-6ubuntu14.3 → 1.18.0-6ubuntu14.4
+│   • postgresql-14: 14.9-0ubuntu0.22.04.1 → 14.10-0ubuntu0.22.04.1
+│   ... e altri 23
+└────────────────────────────
+
+┌─ 🟡 webserver-prod (webserver-prod)
+│ Pacchetti: 15 (apt)
+│ 🔒 Sicurezza: 2
+│ Top pacchetti:
+│   • linux-image: 5.15.0-91 → 5.15.0-94
+│   • openssl: 3.0.2-0ubuntu1.12 → 3.0.2-0ubuntu1.14
+│   • apache2: 2.4.52-1ubuntu4.6 → 2.4.52-1ubuntu4.7
+│   • php8.1: 8.1.2-1ubuntu2.14 → 8.1.2-1ubuntu2.15
+│   • libcurl4: 7.81.0-1ubuntu1.14 → 7.81.0-1ubuntu1.15
+│   ... e altri 10
+└────────────────────────────
+
+┌─ 🟢 backup-server (backup)
+│ Pacchetti: 4 (apt)
+│ Top pacchetti:
+│   • linux-image: 5.15.0-91 → 5.15.0-94
+│   • rsync: 3.2.3-8ubuntu3.1 → 3.2.3-8ubuntu3.2
+│   • tar: 1.34+dfsg-1ubuntu0.1.22.04.1 → 1.34+dfsg-1ubuntu0.1.22.04.2
+│   • cron: 3.0pl1-137ubuntu3 → 3.0pl1-137ubuntu3.1
+└────────────────────────────
+```
+
+**Indicatori di stato:**
+- 🔴 Rosso: >50 pacchetti da aggiornare
+- 🟡 Giallo: 10-50 pacchetti
+- 🟢 Verde: <10 pacchetti
+
+**Package manager supportati:**
+- `apt` (Debian/Ubuntu)
+- `dnf` (Fedora/RHEL 8+)
+- `yum` (CentOS/RHEL 7)
+- `pacman` (Arch Linux)
+- `zypper` (openSUSE/SLES)
 
 ### Configurazione ntfy.sh
 

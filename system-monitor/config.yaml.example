@@ -84,6 +84,19 @@ notifications:
   
   # Invia alert immediati quando si supera una soglia
   send_immediate_alerts: true
+  
+  # ---- Report Settimanale Pacchetti ----
+  # Abilita/disabilita report settimanale pacchetti
+  weekly_packages_enabled: true
+  
+  # Giorno della settimana (monday, tuesday, wednesday, thursday, friday, saturday, sunday)
+  weekly_packages_day: "monday"
+  
+  # Ora UTC per il report settimanale
+  weekly_packages_hour_utc: 8
+  
+  # Minuto per il report settimanale
+  weekly_packages_minute_utc: 0
 
 # ------------------------------------------------
 # Configurazione Database

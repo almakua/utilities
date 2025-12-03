@@ -18,9 +18,11 @@ from .models import (
     DailySummary,
     MetricsReport,
     SystemMetrics,
+    PackageUpdates,
+    PackageUpdatesReport,
 )
 from .notifier import Notifier
-from .collector import collect_metrics
+from .collector import collect_metrics, collect_package_updates
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +201,98 @@ async def send_immediate_alert(alert: Alert):
     )
 
 
+async def send_weekly_package_report():
+    """Send weekly package updates report via ntfy."""
+    global db, notifier, config
+    
+    if not db or not notifier or not config:
+        logger.error("Database or notifier not initialized")
+        return
+    
+    if not config.notifications.weekly_packages_enabled:
+        logger.info("Weekly package report is disabled")
+        return
+    
+    # Get current week identifier (YYYY-WW)
+    now = datetime.utcnow()
+    week_id = now.strftime("%Y-%W")
+    
+    # Check if already sent
+    if db.was_weekly_report_sent(week_id):
+        logger.info(f"Weekly package report already sent for week {week_id}")
+        return
+    
+    logger.info("Generating weekly package report...")
+    
+    # Get all latest package updates
+    all_updates = db.get_all_latest_package_updates()
+    
+    if not all_updates:
+        logger.info("No package updates data available")
+        return
+    
+    # Calculate totals
+    total_packages = sum(u.total_count for u in all_updates)
+    total_security = sum(u.security_updates for u in all_updates)
+    
+    # Build report
+    report_lines = [
+        f"📦 Report Settimanale Pacchetti",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 Settimana: {week_id}",
+        f"🖥️ Sistemi: {len(all_updates)}",
+        f"📊 Totale aggiornamenti: {total_packages}",
+    ]
+    
+    if total_security > 0:
+        report_lines.append(f"🔒 Aggiornamenti sicurezza: {total_security}")
+    
+    report_lines.append("")
+    
+    # Sort by number of updates (highest first)
+    all_updates.sort(key=lambda x: x.total_count, reverse=True)
+    
+    for u in all_updates:
+        status_emoji = "🔴" if u.total_count > 50 else "🟡" if u.total_count > 10 else "🟢"
+        
+        report_lines.append(f"┌─ {status_emoji} {u.hostname} ({u.client_id})")
+        report_lines.append(f"│ Pacchetti: {u.total_count} ({u.package_manager})")
+        
+        if u.security_updates > 0:
+            report_lines.append(f"│ 🔒 Sicurezza: {u.security_updates}")
+        
+        # Show top 5 packages to update
+        if u.packages:
+            report_lines.append(f"│ Top pacchetti:")
+            for pkg in u.packages[:5]:
+                report_lines.append(f"│   • {pkg.name}: {pkg.current_version} → {pkg.new_version}")
+            
+            if len(u.packages) > 5:
+                report_lines.append(f"│   ... e altri {len(u.packages) - 5}")
+        
+        report_lines.append("└────────────────────────────")
+        report_lines.append("")
+    
+    report_content = "\n".join(report_lines)
+    
+    # Determine priority based on total updates
+    priority = "high" if total_security > 10 or total_packages > 100 else "default"
+    
+    # Send notification
+    success = await notifier.send_notification(
+        title=f"📦 Pacchetti da Aggiornare - {total_packages} totali",
+        message=report_content,
+        priority=priority,
+        tags=["package", "arrow_up"]
+    )
+    
+    if success:
+        db.store_weekly_report(week_id, report_content, len(all_updates))
+        logger.info(f"Weekly package report sent successfully for {len(all_updates)} clients")
+    else:
+        logger.error("Failed to send weekly package report")
+
+
 def create_app(app_config: Config) -> FastAPI:
     """Create and configure the FastAPI application."""
     global db, notifier, config, scheduler
@@ -228,6 +322,29 @@ def create_app(app_config: Config) -> FastAPI:
             name="Daily System Report",
             replace_existing=True
         )
+        
+        # Setup scheduler for weekly package reports
+        if config.notifications.weekly_packages_enabled:
+            day_map = {
+                "monday": "mon", "tuesday": "tue", "wednesday": "wed",
+                "thursday": "thu", "friday": "fri", "saturday": "sat", "sunday": "sun"
+            }
+            day_of_week = day_map.get(config.notifications.weekly_packages_day.lower(), "mon")
+            
+            scheduler.add_job(
+                send_weekly_package_report,
+                CronTrigger(
+                    day_of_week=day_of_week,
+                    hour=config.notifications.weekly_packages_hour_utc,
+                    minute=config.notifications.weekly_packages_minute_utc,
+                    timezone="UTC"
+                ),
+                id="weekly_package_report",
+                name="Weekly Package Updates Report",
+                replace_existing=True
+            )
+            logger.info(f"Weekly package report scheduled for {config.notifications.weekly_packages_day} at {config.notifications.weekly_packages_hour_utc:02d}:{config.notifications.weekly_packages_minute_utc:02d} UTC")
+        
         scheduler.start()
         
         logger.info(f"Daily report scheduled at {config.notifications.daily_report_hour_utc:02d}:{config.notifications.daily_report_minute_utc:02d} UTC")
@@ -327,10 +444,52 @@ def create_app(app_config: Config) -> FastAPI:
         
         return alerts[:limit]
     
+    @app.post("/packages", response_model=PackageUpdatesReport)
+    async def receive_package_updates(updates: PackageUpdates):
+        """Receive package updates from a client."""
+        if not db:
+            raise HTTPException(status_code=503, detail="Database not initialized")
+        
+        db.store_package_updates(updates)
+        
+        logger.info(f"Received package updates from {updates.client_id}: {updates.total_count} packages ({updates.security_updates} security)")
+        
+        return PackageUpdatesReport(
+            status="ok",
+            message=f"Package updates stored: {updates.total_count} packages",
+            received_at=datetime.utcnow()
+        )
+    
+    @app.get("/packages/{client_id}")
+    async def get_package_updates(client_id: str):
+        """Get latest package updates for a client."""
+        if not db:
+            raise HTTPException(status_code=503, detail="Database not initialized")
+        
+        updates = db.get_latest_package_updates(client_id)
+        if not updates:
+            raise HTTPException(status_code=404, detail="No package updates found for this client")
+        
+        return updates
+    
+    @app.get("/packages")
+    async def list_all_package_updates():
+        """Get latest package updates for all clients."""
+        if not db:
+            raise HTTPException(status_code=503, detail="Database not initialized")
+        
+        return db.get_all_latest_package_updates()
+    
     @app.post("/test/daily-report")
     async def trigger_daily_report():
         """Manually trigger daily report (for testing)."""
         await send_daily_report()
+        return {"status": "triggered"}
+    
+    @app.post("/test/weekly-report")
+    async def trigger_weekly_report():
+        """Manually trigger weekly package report (for testing)."""
+        await send_weekly_package_report()
         return {"status": "triggered"}
     
     @app.post("/test/collect")
@@ -343,6 +502,20 @@ def create_app(app_config: Config) -> FastAPI:
         db.store_metrics(metrics)
         
         return {"status": "collected", "client_id": metrics.client_id}
+    
+    @app.post("/test/collect-packages")
+    async def test_collect_packages():
+        """Collect and store local package updates (for testing)."""
+        if not db:
+            raise HTTPException(status_code=503, detail="Database not initialized")
+        
+        updates = collect_package_updates(config.client.client_id)
+        if not updates:
+            raise HTTPException(status_code=500, detail="Could not collect package updates")
+        
+        db.store_package_updates(updates)
+        
+        return {"status": "collected", "client_id": updates.client_id, "packages": updates.total_count}
     
     return app
 

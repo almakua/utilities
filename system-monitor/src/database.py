@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 import sqlite3
 
-from .models import SystemMetrics, Alert, DailySummary, ClientInfo
+from .models import SystemMetrics, Alert, DailySummary, ClientInfo, PackageUpdates, UpdatablePackage
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,32 @@ class Database:
                 
                 CREATE INDEX IF NOT EXISTS idx_daily_reports_date 
                 ON daily_reports(report_date);
+                
+                CREATE TABLE IF NOT EXISTS package_updates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    collected_at TIMESTAMP NOT NULL,
+                    package_manager TEXT NOT NULL,
+                    packages TEXT NOT NULL,  -- JSON array
+                    total_count INTEGER,
+                    security_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_package_updates_client_time 
+                ON package_updates(client_id, collected_at);
+                
+                CREATE TABLE IF NOT EXISTS weekly_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    report_week TEXT NOT NULL,  -- Format: YYYY-WW
+                    sent_at TIMESTAMP NOT NULL,
+                    client_count INTEGER,
+                    report_content TEXT
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_weekly_reports_week 
+                ON weekly_reports(report_week);
             """)
             conn.commit()
     
@@ -383,5 +409,84 @@ class Database:
             row = conn.execute("""
                 SELECT id FROM daily_reports WHERE report_date = ?
             """, (report_date.strftime("%Y-%m-%d"),)).fetchone()
+            return row is not None
+    
+    def store_package_updates(self, updates: PackageUpdates) -> int:
+        """Store package updates and return the row ID."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO package_updates (
+                    client_id, hostname, collected_at, package_manager,
+                    packages, total_count, security_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                updates.client_id,
+                updates.hostname,
+                updates.collected_at.isoformat(),
+                updates.package_manager,
+                json.dumps([p.model_dump() for p in updates.packages]),
+                updates.total_count,
+                updates.security_updates,
+            ))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_latest_package_updates(self, client_id: str) -> Optional[PackageUpdates]:
+        """Get the latest package updates for a client."""
+        with self._get_connection() as conn:
+            row = conn.execute("""
+                SELECT * FROM package_updates 
+                WHERE client_id = ?
+                ORDER BY collected_at DESC
+                LIMIT 1
+            """, (client_id,)).fetchone()
+            
+            if not row:
+                return None
+            
+            packages_data = json.loads(row["packages"])
+            packages = [UpdatablePackage(**p) for p in packages_data]
+            
+            return PackageUpdates(
+                client_id=row["client_id"],
+                hostname=row["hostname"],
+                collected_at=datetime.fromisoformat(row["collected_at"]),
+                package_manager=row["package_manager"],
+                packages=packages,
+                security_updates=row["security_count"],
+            )
+    
+    def get_all_latest_package_updates(self) -> list[PackageUpdates]:
+        """Get the latest package updates for all clients."""
+        clients = self.get_clients()
+        updates = []
+        
+        for client in clients:
+            client_updates = self.get_latest_package_updates(client.client_id)
+            if client_updates:
+                updates.append(client_updates)
+        
+        return updates
+    
+    def store_weekly_report(self, report_week: str, content: str, client_count: int):
+        """Store record of sent weekly report."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO weekly_reports (report_week, sent_at, client_count, report_content)
+                VALUES (?, ?, ?, ?)
+            """, (
+                report_week,
+                datetime.utcnow().isoformat(),
+                client_count,
+                content,
+            ))
+            conn.commit()
+    
+    def was_weekly_report_sent(self, report_week: str) -> bool:
+        """Check if weekly report was already sent for this week."""
+        with self._get_connection() as conn:
+            row = conn.execute("""
+                SELECT id FROM weekly_reports WHERE report_week = ?
+            """, (report_week,)).fetchone()
             return row is not None
 

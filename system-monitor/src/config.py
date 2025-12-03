@@ -42,6 +42,11 @@ class NotificationConfig(BaseModel):
     daily_report_hour_utc: int = 7
     daily_report_minute_utc: int = 0
     send_immediate_alerts: bool = True
+    # Weekly package report
+    weekly_packages_enabled: bool = True
+    weekly_packages_day: str = "monday"  # monday, tuesday, etc.
+    weekly_packages_hour_utc: int = 8
+    weekly_packages_minute_utc: int = 0
 
 
 class DatabaseConfig(BaseModel):
@@ -98,6 +103,9 @@ def load_config(config_path: Optional[str] = None) -> Config:
         "SYSMON_ALERT_DISK": ("alerts.disk_percent", float),
         "SYSMON_ALERT_TEMP": ("alerts.temperature_celsius", float),
         "SYSMON_DAILY_HOUR": ("notifications.daily_report_hour_utc", int),
+        "SYSMON_WEEKLY_PKG_ENABLED": ("notifications.weekly_packages_enabled", lambda x: x.lower() == "true"),
+        "SYSMON_WEEKLY_PKG_DAY": ("notifications.weekly_packages_day", str),
+        "SYSMON_WEEKLY_PKG_HOUR": ("notifications.weekly_packages_hour_utc", int),
         "SYSMON_DB_PATH": ("database.path", str),
         "SYSMON_DB_RETENTION": ("database.retention_days", int),
     }
